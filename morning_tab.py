@@ -111,7 +111,7 @@ launches, partnerships and token news. Tag with the product name. Highlight anyt
 with a deadline or launch date. Up to 8 items. If nothing is new, say so in note.
 Start from: https://moca.network  https://www.mocaverse.xyz  https://hellominds.ai  https://minds.games
 """),
-        dict(key="news", title="Headlines and sport", model=FAST_MODEL, searches=9, fetches=4,
+        dict(key="news", title="Headlines and sport", model=FAST_MODEL, searches=12, fetches=4,
              prompt="""
 Give 3 or 4 notable Melbourne or Victorian news stories from the last 24 hours, tagged
 "Melbourne", keeping it light where possible (skip grim crime unless it is major).
@@ -326,18 +326,21 @@ def filter_videos(client, items, usage):
             "ghosts, hauntings, ghost hunts, UFOs, cryptids, unexplained footage, and Halloween "
             "content such as haunted houses, scary decorations and animatronics. "
             "Drop music, K-pop and celebrity clips, gaming, and anything whose title is "
-            "not in English. Rank genuine paranormal footage first. "
+            "not in English. Rank genuine paranormal footage first. When unsure, keep it. "
             "Reply with ONLY the kept numbers, comma separated, best first.\n\n"
             + listing)}])
     pin, pout = PRICES.get(FAST_MODEL, (0.1, 0.5))
     usage.append(resp.usage.input_tokens * pin / 1e6 + resp.usage.output_tokens * pout / 1e6)
     text = "".join(getattr(b, "text", "") for b in resp.content)
+    print("video filter reply:", text[:200])
     keep = [int(n) for n in re.findall(r"\d+", text) if int(n) < len(items)]
     seen, out = set(), []
     for n in keep:
         if n not in seen:
             seen.add(n)
             out.append(items[n])
+    if len(out) < 3:  # filter too strict or confused: fall back to the raw list
+        return items[:8]
     return out[:8]
 
 
@@ -527,8 +530,10 @@ def build(demo=False):
                 data = ask_claude(client, PARANORMAL_BACKUP, usage)
                 for it in data.get("items", []):
                     it.setdefault("tag", "Web")
-                items += data.get("items", [])
-                note = "Some of these were found by web search."
+                found = [it for it in data.get("items", []) if it.get("url")]
+                items += found
+                if found:
+                    note = "Some of these were found by web search."
             except Exception as e:
                 print("paranormal backup failed:", e)
                 if reddit_down:
