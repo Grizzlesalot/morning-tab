@@ -47,7 +47,9 @@ PARANORMAL_SUBS = ["Paranormal", "HighStrangeness", "Ghosts", "Thetruthishere", 
 VIDEO_DOMAINS = ("v.redd.it", "youtube.com", "youtu.be", "tiktok.com",
                  "streamable.com", "instagram.com", "x.com", "twitter.com")
 YOUTUBE_QUERIES = ["ghost caught on camera", "paranormal activity caught on camera",
-                   "UFO sighting", "haunted", "creepy unexplained footage"]
+                   "UFO sighting", "haunted", "creepy unexplained footage", "ghost hunting",
+                   "paranormal investigation", "UFO caught on camera", "scary videos",
+                   "poltergeist", "cryptid sighting", "haunted house"]
 EXCLUDE_CHANNELS = ("slapped ham",)
 
 CARD_SEARCHES = [
@@ -66,7 +68,9 @@ HIGHLIGHT_WORDS = ("essendon", "bombers", "west coast", "eagles")
 SYSTEM = (
     "You research a personal morning briefing page for Chris, who lives in "
     "Cranbourne West in South East Melbourne, Australia. Today is {today}. "
-    "Use your web search and web fetch tools to find what is new. Only report "
+    "Use your web search and web fetch tools to find what is new. When the request "
+    "lists useful pages, fetch those first and use search only to fill gaps, because "
+    "your number of searches is limited. Only report "
     "things you actually found, each with the real URL you found it at. Prefer "
     "the newest items and skip anything older than the window you are given. "
     "Write in plain Australian English, short and friendly. Never use em dashes. "
@@ -111,12 +115,19 @@ launches, partnerships and token news. Tag with the product name. Highlight anyt
 with a deadline or launch date. Up to 8 items. If nothing is new, say so in note.
 Start from: https://moca.network  https://www.mocaverse.xyz  https://hellominds.ai  https://minds.games
 """),
-        dict(key="news", title="Headlines and sport", model=FAST_MODEL, searches=12, fetches=4,
+        dict(key="news", title="Melbourne headlines", model=FAST_MODEL, searches=4, fetches=4,
              prompt="""
 Give 3 or 4 notable Melbourne or Victorian news stories from the last 24 hours, tagged
 "Melbourne", keeping it light where possible (skip grim crime unless it is major).
-Then 5 or 6 sports stories from the last 24 hours tagged with the sport: AFL, AFLW,
-cricket, A-League, NBL, plus any big international sport. Up to 10 items.
+Useful pages: https://www.abc.net.au/news/vic  https://www.theage.com.au/melbourne
+"""),
+        dict(key="sport", title="Sport", model=FAST_MODEL, searches=5, fetches=8,
+             prompt="""
+Give 6 to 8 sports stories from the last 24 hours, tagged with the sport. Cover as many
+of these as have real news: AFL (trade period, draft), AFLW, cricket, A-League, NBL,
+plus any big international sport. Fetch these pages first:
+https://www.abc.net.au/news/sport  https://www.afl.com.au/news  https://www.cricket.com.au/news
+https://keepup.com.au/news  https://nbl.com.au/news
 """),
     ]
     if weekday >= 3:  # Thursday to Sunday
@@ -300,18 +311,43 @@ def youtube_videos():
             ids[it["id"]["videoId"]] = (html.unescape(it["snippet"]["title"]), ch)
     if not ids:
         return []
-    r = requests.get("https://www.googleapis.com/youtube/v3/videos", timeout=20, params=dict(
-        key=key, id=",".join(list(ids)[:50]), part="statistics"))
-    r.raise_for_status()
+    stats, id_list = [], list(ids)
+    for i in range(0, len(id_list), 50):
+        r = requests.get("https://www.googleapis.com/youtube/v3/videos", timeout=20, params=dict(
+            key=key, id=",".join(id_list[i:i + 50]), part="statistics"))
+        r.raise_for_status()
+        stats += r.json().get("items", [])
     out = []
-    for v in r.json().get("items", []):
+    for v in stats:
         views = int(v["statistics"].get("viewCount", 0))
         title, ch = ids[v["id"]]
         out.append(dict(title=title, url=f"https://www.youtube.com/watch?v={v['id']}",
                         source=ch, tag="YouTube", date="", score=views,
                         summary=f"{views:,} views in under 48 hours", highlight=views >= 100000))
     out.sort(key=lambda x: x["score"], reverse=True)
-    return out[:30]
+    return out[:40]
+
+
+BLOCK_WORDS = ("blackpink", "kpop", "k-pop", "bts", "minecraft", "fortnite", "roblox", "gta")
+
+
+def english_title(t):
+    letters = [c for c in t if c.isalpha()]
+    if not letters:
+        return False
+    latin = sum(1 for c in letters if c.isascii())
+    if latin / len(letters) < 0.85:
+        return False
+    # Rough check for Latin-script languages other than English
+    words = re.findall(r"[a-z]+", t.lower())
+    common = {"the", "a", "of", "in", "on", "at", "caught", "camera", "ghost", "haunted",
+              "house", "real", "scary", "night", "ufo", "is", "this", "my", "we", "i", "and", "to"}
+    return any(w in common for w in words)
+
+
+def prefilter_videos(items):
+    return [it for it in items if english_title(it["title"])
+            and not any(b in it["title"].lower() for b in BLOCK_WORDS)]
 
 
 def filter_videos(client, items, usage):
@@ -339,7 +375,7 @@ def filter_videos(client, items, usage):
         if n not in seen:
             seen.add(n)
             out.append(items[n])
-    if len(out) < 3:  # filter too strict or confused: fall back to the raw list
+    if len(out) < 3:  # filter too strict or confused: fall back to the pre-filtered list
         return items[:8]
     return out[:8]
 
@@ -426,7 +462,7 @@ a{color:var(--ink);text-decoration:none;font-weight:600}a:hover{color:var(--acce
 footer{color:var(--muted);font-size:12px;margin-top:24px;text-align:center}
 """
 
-ORDER = ["fantasy", "fixture", "paranormal", "ai", "moca", "cards", "kids", "news"]
+ORDER = ["fantasy", "fixture", "paranormal", "ai", "moca", "cards", "kids", "news", "sport"]
 
 
 def esc(s):
@@ -518,10 +554,10 @@ def build(demo=False):
         vids, reddit_down = reddit_videos()
         yt = youtube_videos()
         try:
-            yt = filter_videos(client, yt, usage)
+            yt = filter_videos(client, prefilter_videos(yt), usage)
         except Exception as e:
             print("video filter failed:", e)
-            yt = yt[:8]
+            yt = prefilter_videos(yt)[:8]
         items = yt + vids
         note = ""
         if len(items) < 5:
