@@ -77,7 +77,7 @@ SYSTEM = (
 )
 
 # ---------------------------------------------------------- Claude sections
-def claude_sections():
+def claude_sections(fixture_hint=""):
     weekday = NOW.weekday()  # Mon=0
     today = NOW.strftime("%A %d %B %Y")
     sat = NOW + dt.timedelta(days=(5 - weekday) % 7)
@@ -88,12 +88,12 @@ def claude_sections():
 Build the AFL Fantasy section. Cover, in this order, whatever is current today ({today}):
 1. AFLW team selections, ins, outs and late changes for the current or next round. Set highlight true when a popular AFLW Fantasy pick is out or a key player returns. Tag "Teams".
 2. New AFLW injuries and expected returns. Tag "Injury".
-3. This round's AFLW fixture with Melbourne kick-off times, as one item listing the games. Tag "Fixture".
 4. AFL trade period, free agency and draft news, each with one short line on the likely 2027 AFL Fantasy impact. Tag "Trade".
 5. Headlines of new official AFL Fantasy or SuperCoach articles from the last 3 days. Tag "Fantasy".
 6. Finally 2 or 3 newsletter angle ideas for The Lens (an AFLW Fantasy newsletter) based on today's news. Tag "Idea", url may be empty.
-If the AFLW season has finished, skip parts 1 to 3. Up to 12 items. Useful pages:
+{fixture_hint}If the AFLW season has finished, skip parts 1 and 2. Up to 12 items. Useful pages:
 https://www.afl.com.au/news  https://www.womens.afl/news  https://www.afl.com.au/fantasy
+https://www.womens.afl/matches/team-lineups
 """),
         dict(key="ai", title="AI updates", model=FAST_MODEL, searches=4, fetches=4,
              prompt="""
@@ -102,7 +102,7 @@ Anthropic (Claude) and xAI (Grok). Tag each with the company name. Highlight big
 launches. Up to 8 items. Start from these pages:
 https://openai.com/news/  https://www.anthropic.com/news  https://x.ai/news
 """),
-        dict(key="moca", title="Moca and Minds", model=FAST_MODEL, searches=5, fetches=5,
+        dict(key="moca", title="Moca and Minds", model=FAST_MODEL, searches=9, fetches=6,
              prompt="""
 Find news from the last 14 days about Moca Network, Mocaverse, AIR Kit and Moca Chain
 (Animoca Brands), Minds by Animoca Brands (personal AI agents, hellominds.ai) and
@@ -111,7 +111,7 @@ launches, partnerships and token news. Tag with the product name. Highlight anyt
 with a deadline or launch date. Up to 8 items. If nothing is new, say so in note.
 Start from: https://moca.network  https://www.mocaverse.xyz  https://hellominds.ai  https://minds.games
 """),
-        dict(key="news", title="Headlines and sport", model=FAST_MODEL, searches=5, fetches=3,
+        dict(key="news", title="Headlines and sport", model=FAST_MODEL, searches=9, fetches=4,
              prompt="""
 Give 3 or 4 notable Melbourne or Victorian news stories from the last 24 hours, tagged
 "Melbourne", keeping it light where possible (skip grim crime unless it is major).
@@ -200,6 +200,37 @@ def ask_claude(client, sec, usage):
     return parse_json(text)
 
 
+AFL_API = "https://aflapi.afl.com.au/afl/v2"
+FIXTURE_HIGHLIGHT = ("essendon", "west coast")
+
+
+def aflw_fixture():
+    """Current AFLW round from the official AFL API (free, no Claude needed)."""
+    seasons = requests.get(f"{AFL_API}/competitions/3/compseasons", headers=UA, timeout=20).json()["compSeasons"]
+    season = max(seasons, key=lambda x: x["id"])
+    cur = season.get("currentRoundNumber") or 1
+    for rnd in (cur, cur + 1):
+        matches = requests.get(f"{AFL_API}/matches", headers=UA, timeout=20, params={
+            "compSeasonId": season["id"], "roundNumber": rnd, "pageSize": 20}).json().get("matches", [])
+        if matches and any(m.get("status") != "CONCLUDED" for m in matches):
+            break
+    else:
+        return None
+    items = []
+    for m in sorted(matches, key=lambda x: x["utcStartTime"]):
+        home, away = m["home"]["team"]["name"], m["away"]["team"]["name"]
+        start = dt.datetime.strptime(m["utcStartTime"][:19], "%Y-%m-%dT%H:%M:%S").replace(
+            tzinfo=dt.timezone.utc).astimezone(MEL)
+        status = m.get("status", "")
+        tag = {"CONFIRMED_TEAMS": "Teams in", "LIVE": "Live", "CONCLUDED": "Done"}.get(status, "")
+        items.append(dict(
+            title=f"{home} v {away}",
+            summary=f"{start.strftime('%a %d %b')} {start.strftime('%I:%M%p').lstrip('0').lower()}, {m['venue']['name']}",
+            url="https://www.womens.afl/fixture", source="", date="", tag=tag,
+            highlight=any(t in (home + away).lower() for t in FIXTURE_HIGHLIGHT)))
+    return dict(title=f"AFLW Round {rnd} fixture", sub="Melbourne time", items=items, note="")
+
+
 # ------------------------------------------------------------ free sections
 WMO = {0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Cloudy", 45: "Fog", 48: "Fog",
        51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle", 61: "Light rain", 63: "Rain",
@@ -260,7 +291,7 @@ def youtube_videos():
     for q in YOUTUBE_QUERIES:
         r = requests.get("https://www.googleapis.com/youtube/v3/search", timeout=20, params=dict(
             key=key, q=q, part="snippet", type="video", order="viewCount",
-            publishedAfter=since, maxResults=10, relevanceLanguage="en"))
+            publishedAfter=since, maxResults=15, relevanceLanguage="en", regionCode="US"))
         r.raise_for_status()
         for it in r.json().get("items", []):
             ch = it["snippet"]["channelTitle"]
@@ -280,6 +311,33 @@ def youtube_videos():
                         source=ch, tag="YouTube", date="", score=views,
                         summary=f"{views:,} views in under 48 hours", highlight=views >= 100000))
     out.sort(key=lambda x: x["score"], reverse=True)
+    return out[:30]
+
+
+def filter_videos(client, items, usage):
+    """Use the cheap model to keep only genuine, English-language paranormal clips."""
+    if not items:
+        return items
+    listing = "\n".join(f"{i}: {it['title']} | channel: {it['source']}" for i, it in enumerate(items))
+    resp = client.messages.create(
+        model=FAST_MODEL, max_tokens=300,
+        messages=[{"role": "user", "content": (
+            "These are trending videos. Keep ones that are paranormal or spooky content: "
+            "ghosts, hauntings, ghost hunts, UFOs, cryptids, unexplained footage, and Halloween "
+            "content such as haunted houses, scary decorations and animatronics. "
+            "Drop music, K-pop and celebrity clips, gaming, and anything whose title is "
+            "not in English. Rank genuine paranormal footage first. "
+            "Reply with ONLY the kept numbers, comma separated, best first.\n\n"
+            + listing)}])
+    pin, pout = PRICES.get(FAST_MODEL, (0.1, 0.5))
+    usage.append(resp.usage.input_tokens * pin / 1e6 + resp.usage.output_tokens * pout / 1e6)
+    text = "".join(getattr(b, "text", "") for b in resp.content)
+    keep = [int(n) for n in re.findall(r"\d+", text) if int(n) < len(items)]
+    seen, out = set(), []
+    for n in keep:
+        if n not in seen:
+            seen.add(n)
+            out.append(items[n])
     return out[:8]
 
 
@@ -365,7 +423,7 @@ a{color:var(--ink);text-decoration:none;font-weight:600}a:hover{color:var(--acce
 footer{color:var(--muted);font-size:12px;margin-top:24px;text-align:center}
 """
 
-ORDER = ["fantasy", "paranormal", "ai", "moca", "cards", "kids", "news"]
+ORDER = ["fantasy", "fixture", "paranormal", "ai", "moca", "cards", "kids", "news"]
 
 
 def esc(s):
@@ -431,7 +489,16 @@ def build(demo=False):
     else:
         import anthropic
         client = anthropic.Anthropic()
-        jobs = claude_sections()
+        fixture_hint = ""
+        try:
+            fixture = aflw_fixture()
+            if fixture:
+                sections["fixture"] = fixture
+                games = "; ".join(f"{i['title']} ({i['summary']})" for i in fixture["items"])
+                fixture_hint = f"This round's fixture is already known, do not search for it: {games}\n"
+        except Exception as e:
+            print("fixture failed:", e)
+        jobs = claude_sections(fixture_hint)
         with cf.ThreadPoolExecutor(max_workers=len(jobs)) as ex:
             futs = {ex.submit(ask_claude, client, s, usage): s for s in jobs}
             for fut in cf.as_completed(futs):
@@ -447,6 +514,11 @@ def build(demo=False):
         # Paranormal videos (free sources first)
         vids, reddit_down = reddit_videos()
         yt = youtube_videos()
+        try:
+            yt = filter_videos(client, yt, usage)
+        except Exception as e:
+            print("video filter failed:", e)
+            yt = yt[:8]
         items = yt + vids
         note = ""
         if len(items) < 5:
