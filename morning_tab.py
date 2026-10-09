@@ -134,6 +134,17 @@ https://whatson.melbourne.vic.gov.au  https://www.weekendnotes.com
     return sections
 
 
+PARANORMAL_BACKUP = dict(
+    key="paranormal", title="Trending paranormal videos", model=FAST_MODEL,
+    searches=6, fetches=4, prompt="""
+Find the most viral paranormal videos posted in the last 48 hours: ghosts, hauntings,
+UFOs, cryptids and creepy unexplained footage, on YouTube, TikTok, Instagram, X or Reddit.
+Prefer clips that are getting a lot of views or shares right now, and say the view or
+upvote count in the summary if you can find it. Skip anything posted by Slapped Ham.
+Tag each with the platform. Highlight anything clearly blowing up. Up to 8 items.
+""")
+
+
 def tool_defs(searches, fetches, direct=False):
     s = {"type": "web_search_20260318", "name": "web_search", "max_uses": searches,
          "user_location": USER_LOCATION}
@@ -438,10 +449,18 @@ def build(demo=False):
         yt = youtube_videos()
         items = yt + vids
         note = ""
-        if reddit_down:
-            note = "Reddit blocked the automatic check today."
-        if not os.environ.get("YOUTUBE_API_KEY"):
-            note = (note + " Add a YouTube API key to include YouTube.").strip()
+        if len(items) < 5:
+            # Backup: let Claude search for viral paranormal clips.
+            try:
+                data = ask_claude(client, PARANORMAL_BACKUP, usage)
+                for it in data.get("items", []):
+                    it.setdefault("tag", "Web")
+                items += data.get("items", [])
+                note = "Some of these were found by web search."
+            except Exception as e:
+                print("paranormal backup failed:", e)
+                if reddit_down:
+                    note = "Reddit blocked the automatic check today."
         sections["paranormal"] = dict(title="Trending paranormal videos", sub="last 24 to 48 hours",
                                       items=items[:12], note=note)
 
